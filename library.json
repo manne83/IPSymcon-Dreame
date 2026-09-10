@@ -1,0 +1,12 @@
+{
+    "id": "{8ED58A3F-1EAA-4F7E-B71D-674E9C31C54E}",
+    "name": "Dreame Robot",
+    "author": "Symcon-Smartwerk",
+    "url": "https://github.com/manne83/IPSymcon-Dreame",
+    "compatibility": {
+        "version": "9.0"
+    },
+    "version": "0.1",
+    "build": 1,
+    "date": 0
+}
