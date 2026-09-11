@@ -54,8 +54,10 @@ class DreameRobot extends IPSModuleStrict
         $this->RegisterVariableFloat('CleanedArea', $this->Translate('Cleaned area'), 'DRM.Area', 90);
         $this->RegisterVariableInteger('StatusCode', 'Status code', '', 100);
         $this->RegisterVariableInteger('TaskStatus', 'Task status', '', 110);
-        $this->RegisterVariableInteger('LastUpdate', $this->Translate('Last update'), '~UnixTimestamp', 120);
-        $this->RegisterVariableInteger('Command', $this->Translate('Command'), 'DRM.Command', 130);
+        $this->RegisterVariableInteger('CleaningMode', $this->Translate('Cleaning mode'), 'DRM.CleaningMode', 120);
+        $this->EnableAction('CleaningMode');
+        $this->RegisterVariableInteger('LastUpdate', $this->Translate('Last update'), '~UnixTimestamp', 130);
+        $this->RegisterVariableInteger('Command', $this->Translate('Command'), 'DRM.Command', 140);
         $this->EnableAction('Command');
     }
 
@@ -93,6 +95,11 @@ class DreameRobot extends IPSModuleStrict
 
     public function RequestAction(string $Ident, mixed $Value): void
     {
+        if ($Ident === 'CleaningMode') {
+            $this->SetCleaningMode((int) $Value);
+            return;
+        }
+
         if ($Ident !== 'Command') {
             throw new InvalidArgumentException('Unknown action ident');
         }
@@ -173,6 +180,109 @@ class DreameRobot extends IPSModuleStrict
     public function Locate(): bool
     {
         return $this->executeCommand('Locate', static fn (DreameHomeClient $client): array => $client->locate());
+    }
+
+    public function StartShortcut(int $ShortcutID): bool
+    {
+        return $this->executeCommand(
+            'Start shortcut ' . $ShortcutID,
+            static fn (DreameHomeClient $client): array => $client->startShortcut($ShortcutID)
+        );
+    }
+
+    public function GetShortcuts(): string
+    {
+        try {
+            $client = $this->createPreparedClient();
+            $shortcuts = $client->getShortcuts();
+            $this->saveSession($client);
+            return json_encode($shortcuts, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $exception) {
+            $this->setFailureStatus($exception);
+            $this->SendDebug('Get shortcuts failed', $exception->getMessage(), 0);
+            return '[]';
+        }
+    }
+
+    public function ListShortcuts(): string
+    {
+        $shortcuts = json_decode($this->GetShortcuts(), true);
+        if (!is_array($shortcuts) || count($shortcuts) === 0) {
+            return $this->Translate('No Dreame shortcuts were found.');
+        }
+        $lines = [$this->Translate('Available Dreame shortcuts:')];
+        foreach ($shortcuts as $shortcut) {
+            $lines[] = sprintf('%s | ID %d', (string) ($shortcut['name'] ?? ''), (int) ($shortcut['id'] ?? 0));
+        }
+        return implode("\n", $lines);
+    }
+
+    public function GetCurrentMap(): string
+    {
+        try {
+            $client = $this->createPreparedClient();
+            $map = $client->getCurrentMap();
+            $this->saveSession($client);
+            $map['instanceID'] = $this->InstanceID;
+            $map['deviceName'] = $client->getDeviceName();
+            $map['state'] = (string) $this->GetValue('State');
+            $map['online'] = true;
+            return json_encode($map, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $exception) {
+            $this->SendDebug('Get map failed', $exception->getMessage(), 0);
+            return json_encode([
+                'instanceID' => $this->InstanceID,
+                'deviceName' => (string) $this->GetValue('DeviceName'),
+                'online' => false,
+                'error' => $exception->getMessage()
+            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        }
+    }
+
+    public function TestMap(): string
+    {
+        $map = json_decode($this->GetCurrentMap(), true);
+        if (!is_array($map) || isset($map['error'])) {
+            return $this->Translate('Map test failed: ') . (string) ($map['error'] ?? 'unknown');
+        }
+        return sprintf(
+            $this->Translate('Map received: %d x %d cells, position %d / %d, source %s'),
+            (int) $map['width'],
+            (int) $map['height'],
+            (int) $map['robot']['x'],
+            (int) $map['robot']['y'],
+            (string) $map['source']
+        );
+    }
+
+    public function SetCleaningMode(int $Mode): bool
+    {
+        return $this->executeCommand(
+            'Set cleaning mode',
+            static function (DreameHomeClient $client) use ($Mode): array {
+                $client->setCleaningMode($Mode);
+                return [];
+            }
+        );
+    }
+
+    public function GetCoordinatorState(): string
+    {
+        $taskStatus = (int) $this->GetValue('TaskStatus');
+        return json_encode([
+            'instanceID' => $this->InstanceID,
+            'online' => (bool) $this->GetValue('Online'),
+            'deviceName' => (string) $this->GetValue('DeviceName'),
+            'model' => (string) $this->GetValue('Model'),
+            'battery' => (int) $this->GetValue('Battery'),
+            'state' => (string) $this->GetValue('State'),
+            'statusCode' => (int) $this->GetValue('StatusCode'),
+            'taskStatus' => $taskStatus,
+            'taskActive' => $taskStatus > 0,
+            'cleaningMode' => (int) $this->GetValue('CleaningMode'),
+            'errorCode' => (int) $this->GetValue('ErrorCode'),
+            'lastUpdate' => (int) $this->GetValue('LastUpdate')
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
     }
 
     public function TestConnection(): string
@@ -302,6 +412,7 @@ class DreameRobot extends IPSModuleStrict
         $this->SetValue('CleanedArea', max(0.0, (float) ($values['7'] ?? 0.0)));
         $this->SetValue('StatusCode', (int) ($values['5'] ?? -1));
         $this->SetValue('TaskStatus', (int) ($values['11'] ?? -1));
+        $this->SetValue('CleaningMode', $this->decodeCleaningMode((int) ($values['27'] ?? -1), $client->getModel()));
     }
 
     private function executeCommand(string $name, callable $command): bool
@@ -385,6 +496,19 @@ class DreameRobot extends IPSModuleStrict
         return $this->Translate($states[$state] ?? ('Unknown (' . $state . ')'));
     }
 
+    private function decodeCleaningMode(int $rawMode, string $model): int
+    {
+        if (str_contains(strtolower($model), 'r6001') || str_contains(strtolower($model), 'x60')) {
+            return match ($rawMode & 0x03) {
+                2 => 0,
+                1 => 1,
+                0 => 2,
+                3 => 3
+            };
+        }
+        return in_array($rawMode, [0, 1, 2, 3], true) ? $rawMode : -1;
+    }
+
     private function registerProfiles(): void
     {
         if (!IPS_VariableProfileExists('DRM.Command')) {
@@ -401,6 +525,15 @@ class DreameRobot extends IPSModuleStrict
             IPS_CreateVariableProfile('DRM.Minutes', VARIABLETYPE_INTEGER);
             IPS_SetVariableProfileValues('DRM.Minutes', 0, 1440, 1);
             IPS_SetVariableProfileText('DRM.Minutes', '', ' min');
+        }
+
+        if (!IPS_VariableProfileExists('DRM.CleaningMode')) {
+            IPS_CreateVariableProfile('DRM.CleaningMode', VARIABLETYPE_INTEGER);
+            IPS_SetVariableProfileAssociation('DRM.CleaningMode', -1, $this->Translate('Unknown'), '', 0x777777);
+            IPS_SetVariableProfileAssociation('DRM.CleaningMode', 0, $this->Translate('Vacuum only'), '', 0x3388CC);
+            IPS_SetVariableProfileAssociation('DRM.CleaningMode', 1, $this->Translate('Mop only'), '', 0x33AA99);
+            IPS_SetVariableProfileAssociation('DRM.CleaningMode', 2, $this->Translate('Vacuum and mop'), '', 0x7755CC);
+            IPS_SetVariableProfileAssociation('DRM.CleaningMode', 3, $this->Translate('Mop after vacuum'), '', 0xCC8833);
         }
 
         if (!IPS_VariableProfileExists('DRM.Area')) {

@@ -54,6 +54,16 @@
             "type": "Button",
             "caption": "Update now",
             "onClick": "DRM_Update($id);"
+        },
+        {
+            "type": "Button",
+            "caption": "List Dreame shortcuts",
+            "onClick": "echo DRM_ListShortcuts($id);"
+        },
+        {
+            "type": "Button",
+            "caption": "Test live map",
+            "onClick": "echo DRM_TestMap($id);"
         }
     ],
     "status": [
