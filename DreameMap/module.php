@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-class DreameMap extends IPSModuleStrict
+class DreameMultiMap extends IPSModuleStrict
 {
     private const ROBOT_MODULE_ID = '{6B87C506-2B66-48BB-8E1C-EA41DDE8D353}';
     private const STATUS_INVALID_CONFIGURATION = 200;
