@@ -14,11 +14,10 @@ class DreameMultiMap extends IPSModuleStrict
         $this->RegisterPropertyBoolean('Active', false);
         $this->RegisterPropertyString('Robots', '[]');
         $this->RegisterPropertyInteger('UpdateInterval', 60);
+        $this->RegisterAttributeString('MapStatus', $this->Translate('Ready'));
+        $this->RegisterAttributeInteger('LastUpdate', 0);
         $this->RegisterTimer('MapTimer', 0, "DRMM_Update(\$_IPS['TARGET']);");
         $this->RegisterVariableString('MapView', $this->Translate('Live maps'), '~HTMLBox', 10);
-        $this->RegisterVariableString('MapStatus', $this->Translate('Map status'), '', 20);
-        $this->RegisterVariableInteger('LastUpdate', $this->Translate('Last map update'), '~UnixTimestamp', 30);
-        $this->SetValue('MapStatus', $this->Translate('Ready'));
     }
 
     public function ApplyChanges(): void
@@ -33,7 +32,7 @@ class DreameMultiMap extends IPSModuleStrict
             $this->getRobots();
         } catch (Throwable $exception) {
             $this->SetTimerInterval('MapTimer', 0);
-            $this->SetValue('MapStatus', $exception->getMessage());
+            $this->WriteAttributeString('MapStatus', $exception->getMessage());
             $this->SetStatus(self::STATUS_INVALID_CONFIGURATION);
             return;
         }
@@ -68,12 +67,15 @@ class DreameMultiMap extends IPSModuleStrict
                 }
             }
             $this->SetValue('MapView', $this->renderDashboard($cards));
-            $this->SetValue('LastUpdate', time());
-            $this->SetValue('MapStatus', $failures > 0 ? $this->Translate('Partial failure') : $this->Translate('Updated'));
+            $this->WriteAttributeInteger('LastUpdate', time());
+            $this->WriteAttributeString(
+                'MapStatus',
+                $failures > 0 ? $this->Translate('Partial failure') : $this->Translate('Updated')
+            );
             $this->SetStatus($failures === count($cards) ? self::STATUS_MAP_ERROR : IS_ACTIVE);
             return $failures === 0;
         } catch (Throwable $exception) {
-            $this->SetValue('MapStatus', $exception->getMessage());
+            $this->WriteAttributeString('MapStatus', $exception->getMessage());
             $this->SetStatus(self::STATUS_MAP_ERROR);
             return false;
         } finally {
