@@ -44,6 +44,7 @@ final class DreameHomeClient
     private string $model = '';
     private string $bindDomain = '';
     private int $requestID;
+    private string $lastAuthenticationError = '';
 
     public function __construct(
         string $country,
@@ -87,7 +88,10 @@ final class DreameHomeClient
         }
 
         if (!$this->authenticate(false)) {
-            throw new RuntimeException('Dreamehome login failed');
+            $detail = $this->lastAuthenticationError !== ''
+                ? ': ' . $this->lastAuthenticationError
+                : '';
+            throw new RuntimeException('Dreamehome login failed' . $detail);
         }
     }
 
@@ -384,6 +388,7 @@ final class DreameHomeClient
 
     private function authenticate(bool $withRefreshToken): bool
     {
+        $this->lastAuthenticationError = '';
         $grant = $withRefreshToken ? 'refresh_token' : 'password';
         $fields = [
             'platform' => 'IOS',
@@ -405,6 +410,7 @@ final class DreameHomeClient
         );
 
         if ($status !== 200) {
+            $this->lastAuthenticationError = $this->authenticationError($status, $body);
             if ($withRefreshToken) {
                 $this->accessToken = '';
                 $this->refreshToken = '';
@@ -416,6 +422,7 @@ final class DreameHomeClient
         $data = $this->decodeJSON($body);
         $accessToken = (string) ($data['access_token'] ?? '');
         if ($accessToken === '') {
+            $this->lastAuthenticationError = 'the server returned no access token';
             return false;
         }
 
@@ -658,11 +665,11 @@ final class DreameHomeClient
             'Accept-Language' => 'en-US;q=0.8',
             'Accept-Encoding' => 'gzip, deflate',
             'User-Agent' => self::USER_AGENT,
-            'Dreame-Rlc' => self::CLIENT_AUTH,
+            'Authorization' => self::CLIENT_AUTH,
             'Tenant-Id' => $this->tenantID !== '' ? $this->tenantID : self::DEFAULT_TENANT
         ];
         if ($this->country === 'cn') {
-            $headers['Dreame-Auth'] = self::CHINA_AUTH;
+            $headers['Dreame-Rlc'] = self::CHINA_AUTH;
         }
         return $headers;
     }
@@ -670,16 +677,44 @@ final class DreameHomeClient
     /** @return array<string, string> */
     private function apiHeaders(): array
     {
-        return [
+        $headers = [
             'Accept' => '*/*',
             'Content-Type' => 'application/json',
             'Accept-Language' => 'en-US;q=0.8',
             'Accept-Encoding' => 'gzip, deflate',
             'User-Agent' => self::USER_AGENT,
-            'Dreame-Rlc' => self::CLIENT_AUTH,
+            'Authorization' => self::CLIENT_AUTH,
             'Tenant-Id' => $this->tenantID !== '' ? $this->tenantID : self::DEFAULT_TENANT,
-            'Authorization' => $this->accessToken
+            'Dreame-Auth' => $this->accessToken
         ];
+        if ($this->country === 'cn') {
+            $headers['Dreame-Rlc'] = self::CHINA_AUTH;
+        }
+        return $headers;
+    }
+
+    private function authenticationError(int $status, string $body): string
+    {
+        $error = '';
+        $description = '';
+        try {
+            $data = json_decode($body, true, 32, JSON_THROW_ON_ERROR);
+            if (is_array($data)) {
+                $error = (string) ($data['error'] ?? '');
+                $description = (string) ($data['error_description'] ?? $data['message'] ?? '');
+            }
+        } catch (JsonException) {
+            // Do not include an unknown response body because it could contain account data.
+        }
+
+        $safeParts = [];
+        foreach ([$error, $description] as $part) {
+            $part = trim(preg_replace('/[^a-zA-Z0-9 _.,:()\-]/', '', $part) ?? '');
+            if ($part !== '' && !in_array($part, $safeParts, true)) {
+                $safeParts[] = substr($part, 0, 160);
+            }
+        }
+        return 'HTTP ' . $status . ($safeParts !== [] ? ' (' . implode(': ', $safeParts) . ')' : '');
     }
 
     private function getBaseURL(): string
