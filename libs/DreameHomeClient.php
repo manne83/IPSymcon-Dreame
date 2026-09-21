@@ -52,7 +52,12 @@ final class DreameHomeClient
         array $session = []
     ) {
         $country = strtolower(trim($country));
-        if ($country !== 'de') {
+        // Dreame groups Germany and Switzerland in its European cloud shard.
+        // Keep accepting the original module values so existing instances
+        // automatically migrate without requiring configuration changes.
+        if (in_array($country, ['de', 'ch', 'eu'], true)) {
+            $country = 'eu';
+        } else {
             throw new InvalidArgumentException('Unsupported Dreamehome region');
         }
 

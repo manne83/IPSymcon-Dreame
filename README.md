@@ -6,7 +6,7 @@ adds parallel multi-robot cleaning plans and an experimental live-map view.
 
 ## Current feature set
 
-- Dreamehome login through the European endpoint (`de`) used for Germany and
+- Dreamehome login through the European endpoint (`eu`) used for Germany and
   Switzerland
 - Vacuum discovery and automatic X60 selection
 - State, battery, charging state, error, cleaning time and cleaned area
