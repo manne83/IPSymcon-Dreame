@@ -285,26 +285,33 @@ final class DreameHomeClient
     /** @return array<string, mixed> */
     public function getCurrentMap(): array
     {
-        $response = $this->action(6, 1, [[
-            'piid' => 2,
-            'value' => json_encode([
-                'req_type' => 1,
-                'frame_type' => 'I',
-                'force_type' => 1
-            ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)
-        ]]);
-
         $rawMap = '';
         $objectName = '';
-        foreach ($response['out'] ?? [] as $property) {
-            if (!is_array($property)) {
-                continue;
+        $actionError = null;
+        try {
+            $response = $this->action(6, 1, [[
+                'piid' => 2,
+                'value' => json_encode([
+                    'req_type' => 1,
+                    'frame_type' => 'I',
+                    'force_type' => 1
+                ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)
+            ]]);
+
+            foreach ($response['out'] ?? [] as $property) {
+                if (!is_array($property)) {
+                    continue;
+                }
+                if ((int) ($property['piid'] ?? 0) === 1) {
+                    $rawMap = (string) ($property['value'] ?? '');
+                } elseif ((int) ($property['piid'] ?? 0) === 3) {
+                    $objectName = (string) ($property['value'] ?? '');
+                }
             }
-            if ((int) ($property['piid'] ?? 0) === 1) {
-                $rawMap = (string) ($property['value'] ?? '');
-            } elseif ((int) ($property['piid'] ?? 0) === 3) {
-                $objectName = (string) ($property['value'] ?? '');
-            }
+        } catch (Throwable $exception) {
+            // Newer Dreamehome-only models can reject REQUEST_MAP while their
+            // current map remains available through cloud property 6.3.
+            $actionError = $exception;
         }
 
         $source = 'direct';
@@ -313,9 +320,28 @@ final class DreameHomeClient
         if (str_contains($objectName, ',')) {
             [$fileName, $mapKey] = explode(',', $objectName, 2);
         }
-        if ($rawMap === '' && $objectName !== '') {
-            $rawMap = $this->downloadMapObject($fileName);
-            $source = 'cloud-file';
+        if ($rawMap === '') {
+            try {
+                if ($objectName === '') {
+                    $objectName = $this->getCloudMapObjectName();
+                    $fileName = $objectName;
+                    if (str_contains($objectName, ',')) {
+                        [$fileName, $mapKey] = explode(',', $objectName, 2);
+                    }
+                }
+                $rawMap = $this->downloadMapObject($fileName);
+                $source = 'cloud-file';
+            } catch (Throwable $cloudError) {
+                if ($actionError !== null) {
+                    throw new RuntimeException(
+                        'Map request failed (' . $actionError->getMessage() .
+                        '); cloud map failed (' . $cloudError->getMessage() . ')',
+                        0,
+                        $cloudError
+                    );
+                }
+                throw $cloudError;
+            }
         }
         if ($rawMap === '') {
             throw new RuntimeException('Robot returned neither map data nor a map file');
@@ -525,20 +551,88 @@ final class DreameHomeClient
 
     private function downloadMapObject(string $objectName): string
     {
-        $response = $this->apiRequest('dreame-user-iot/iotfile/getOss1dDownloadUrl', [
-            'did' => $this->deviceID,
-            'model' => $this->model,
-            'filename' => $objectName,
-            'region' => $this->country
-        ]);
-        $url = $response['data'] ?? '';
-        if (is_array($url)) {
-            $url = $url['url'] ?? $url['downloadUrl'] ?? '';
+        $url = '';
+        $preferredError = null;
+        try {
+            $response = $this->apiRequest('dreame-user-iot/iotfile/getDownloadUrl', [
+                'did' => $this->deviceID,
+                'model' => $this->model,
+                'filename' => $objectName,
+                'region' => $this->country
+            ]);
+            $url = $this->extractDownloadURL($response['data'] ?? '');
+        } catch (Throwable $exception) {
+            $preferredError = $exception;
         }
-        if (!is_string($url) || !str_starts_with($url, 'https://')) {
+
+        if ($url === '') {
+            try {
+                $response = $this->apiRequest('dreame-user-iot/iotfile/getOss1dDownloadUrl', [
+                    'did' => $this->deviceID,
+                    'uid' => $this->userID,
+                    'model' => $this->model,
+                    'filename' => str_starts_with($objectName, '/') ? substr($objectName, 1) : $objectName,
+                    'region' => $this->country
+                ]);
+                $url = $this->extractDownloadURL($response['data'] ?? '');
+            } catch (Throwable $fallbackError) {
+                throw new RuntimeException(
+                    'Map download address is unavailable' .
+                    ($preferredError !== null ? ': ' . $preferredError->getMessage() : ''),
+                    0,
+                    $fallbackError
+                );
+            }
+        }
+        if (!str_starts_with($url, 'https://')) {
             throw new RuntimeException('Map download URL is missing');
         }
         return $this->httpGet($url);
+    }
+
+    private function getCloudMapObjectName(): string
+    {
+        $response = $this->apiRequest('dreame-user-iot/iotstatus/props', [
+            'did' => $this->deviceID,
+            'keys' => '6.3'
+        ]);
+        $properties = $response['data'] ?? [];
+        if (is_array($properties)) {
+            foreach ($properties as $property) {
+                if (!is_array($property)) {
+                    continue;
+                }
+                $value = $property['value'] ?? $property['val'] ?? null;
+                if (is_string($value)) {
+                    $decoded = json_decode($value, true);
+                    if (is_array($decoded)) {
+                        $value = $decoded;
+                    }
+                }
+                if (is_array($value)) {
+                    $value = $value[0] ?? '';
+                }
+                if (is_string($value) && trim($value) !== '') {
+                    return trim($value);
+                }
+            }
+        }
+
+        if ($this->model !== '' && $this->userID !== '' && $this->deviceID !== '') {
+            return $this->model . '/' . $this->userID . '/' . $this->deviceID . '/0';
+        }
+        throw new RuntimeException('Current map filename is unavailable');
+    }
+
+    private function extractDownloadURL(mixed $data): string
+    {
+        if (is_string($data)) {
+            return trim($data);
+        }
+        if (is_array($data)) {
+            return trim((string) ($data['url'] ?? $data['downloadUrl'] ?? ''));
+        }
+        return '';
     }
 
     /** @return array<string, mixed> */
